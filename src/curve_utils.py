@@ -1,22 +1,18 @@
 import numpy as np
-# Import numerical utilities
-try:
-    from .numerical_utils import compute_curvature_from_points
-except ImportError:
-    from numerical_utils import compute_curvature_from_points
+import jax.numpy as jnp
 
 def get_curve_functions():
     """Return a dictionary of available curve functions."""
     return {
-        'sine': lambda x: np.sin(4*np.pi*x),
-        'double_sine': lambda x: np.sin(6*np.pi*x) + 0.5*np.sin(8*np.pi*x),
-        'damped_sine': lambda x: np.exp(-2*x) * np.sin(6*np.pi*x),
-        'sine_cos': lambda x: np.sin(3*np.pi*x) * np.cos(2*np.pi*x),
+        'sine': lambda x: jnp.sin(2*jnp.pi*x),
+        'double_sine': lambda x: jnp.sin(6*jnp.pi*x) + 0.5*jnp.sin(8*jnp.pi*x),
+        'damped_sine': lambda x: jnp.exp(-2*x) * jnp.sin(6*jnp.pi*x),
+        'sine_cos': lambda x: jnp.sin(3*jnp.pi*x) * jnp.cos(2*jnp.pi*x),
         'cubic': lambda x: 4*x**3 - 6*x**2 + 2*x,
-        'heart': lambda x: 0.5*np.sin(np.pi*x) * (1 + 0.3*np.cos(4*np.pi*x)),
-        'spiral': lambda x: 0.3*x*np.sin(8*np.pi*x),
-        'bumpy': lambda x: np.sin(2*np.pi*x) + 0.3*np.sin(10*np.pi*x) + 0.1*np.sin(20*np.pi*x),
-        'exponential': lambda x: np.exp(-3*x),
+        'heart': lambda x: 0.5*jnp.sin(jnp.pi*x) * (1 + 0.3*jnp.cos(4*jnp.pi*x)),
+        'spiral': lambda x: 0.3*x*jnp.sin(8*jnp.pi*x),
+        'bumpy': lambda x: jnp.sin(2*jnp.pi*x) + 0.3*jnp.sin(10*jnp.pi*x) + 0.1*jnp.sin(20*jnp.pi*x),
+        'exponential': lambda x: jnp.exp(-3*x),
         'hyperbola': lambda x: 1/(x+0.2)
     }
 
@@ -72,7 +68,11 @@ def _plot_curve_and_trace(ax, curve_func, box_min, box_max, p0f, p1f, results, c
     """Plot the main curve and trace on the given axis."""
     # Plot the theoretical curve
     x = np.linspace(box_min[0]-0.2, box_max[0]+0.2, 800)
-    ax.plot(x, curve_func(x), 'k--', alpha=0.6, lw=1.5, label='curve')
+    y_curve = curve_func(x)
+    # Convert JAX array to numpy if needed
+    if hasattr(y_curve, 'block_until_ready'):
+        y_curve = np.asarray(y_curve)
+    ax.plot(x, y_curve, 'k--', alpha=0.6, lw=1.5, label='curve')
 
     # Plot the bounding box
     ax.plot([box_min[0], box_max[0], box_max[0], box_min[0], box_min[0]],
@@ -164,11 +164,14 @@ def _plot_step_size_evolution(ax, results):
 
 
 def _plot_curvature_evolution(ax, results):
-    """Plot the curvature evolution on the given axis."""
-    # Use tracked curvature if available, otherwise compute from points
-    if hasattr(results, 'kappa_history') and results.kappa_history and len(results.kappa_history) > 0:
+    """Plot the curvature-variation (CurvVar) evolution on the given axis.
+
+    Note: Visualization only displays tracked values; it does not compute metrics.
+    """
+    # Use tracked CurvVar history if available
+    if hasattr(results, 'curvvar_history') and results.curvvar_history and len(results.curvvar_history) > 0:
         x_coords = results.points[:,0]
-        curvature_vals = results.kappa_history
+        curvature_vals = results.curvvar_history
 
         # Handle different length scenarios
         if len(curvature_vals) == len(x_coords):
@@ -177,19 +180,19 @@ def _plot_curvature_evolution(ax, results):
             ax.plot(x_coords[1:], curvature_vals, 'm-o', alpha=0.8, linewidth=2, ms=2)
         else:
             ax.plot(range(len(curvature_vals)), curvature_vals, 'm-o', alpha=0.8, linewidth=2, ms=2)
-            ax.text(0.5, 0.95, f'Warning: curvature_history length {len(curvature_vals)} does not match points {len(x_coords)}',
+            ax.text(0.5, 0.95, f'Warning: curvvar_history length {len(curvature_vals)} does not match points {len(x_coords)}',
                     ha='center', va='top', transform=ax.transAxes, color='red', fontsize=10)
 
-        ax.set_ylabel('Curvature (tracked)')
+        ax.set_ylabel('CurvVar (tracked)')
     else:
-        # Fallback: compute curvature from points
-        curvature_vals = compute_curvature_from_points(results.points)
-        x_coords = results.points[:,0]
-        ax.plot(x_coords, curvature_vals, 'm-o', alpha=0.8, linewidth=2, ms=2)
-        ax.set_ylabel('Curvature (computed)')
+        # No tracked CurvVar available; inform the user rather than compute
+        ax.text(0.5, 0.5, 'No CurvVar history available\n(set track_curvvar=True)',
+                ha='center', va='center', transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.5))
+        ax.set_ylabel('CurvVar')
 
     ax.set_xlabel('x (curve coordinate)')
-    ax.set_title('Curvature Evolution Along Curve')
+    ax.set_title('Curvature Variation Along Curve')
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
