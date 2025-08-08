@@ -8,6 +8,11 @@ This script replicates the logic of the `tracer.ipynb` notebook.
 #%%
 # CELL 1: IMPORTS AND SETUP
 # ----------------------------------------------------------------
+import os
+# Set the environment variable for deterministic operations on Nvidia GPUs
+os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
+import jax
+jax.config.update("jax_default_matmul_precision", "float32")
 import sys
 import os
 import numpy as np
@@ -20,6 +25,11 @@ if 'src' not in sys.path:
 from src.tracer import TraceConfig, trace_curve_in_box
 from src.curve_utils import get_curve_functions, calculate_box_bounds, plot_trace_result
 from src.nn_model import get_nn_functions, generate_data
+from src.nn_visualization import (
+    visualize_nn_learning_quality,
+    visualize_training_data,
+    debug_nn_functions,
+)
 
 print("All modules loaded successfully.")
 
@@ -27,12 +37,19 @@ print("All modules loaded successfully.")
 #%%
 # CELL 2: SETUP CURVE AND TRACING PARAMETERS
 # ----------------------------------------------------------------
-curve_name = 'double_sine'
+curve_name = 'sine_cos'
 curve_func = get_curve_functions()[curve_name]
 
 # Pick points on curve
-x_picks = [0.01, 0.9]
-points = np.array([[x, curve_func(x)] for x in x_picks])
+x_picks = [0.00, 1.00]
+points = []
+for x in x_picks:
+    y = curve_func(x)
+    # Convert JAX array to numpy if needed
+    if hasattr(y, 'block_until_ready'):
+        y = np.asarray(y)
+    points.append([x, y])
+points = np.array(points)
 
 # Edge configuration
 point1_edge = 'left'
@@ -58,60 +75,97 @@ print(f"   Box: [{box_min[0]:.3f}, {box_max[0]:.3f}] × [{box_min[1]:.3f}, {box_
 #%%
 # CELL 2.5: VISUALIZE THE GENERATED DATA
 # ----------------------------------------------------------------
+# %matplotlib widget
 import jax # Needed for PRNGKey
 
 print("\nGenerating and visualizing training data...")
 
 # 1. Define the analytical function that provides the ground truth
-analytical_f_for_data = lambda p: p[1] - curve_func(p[0])
+def analytical_f_for_data(p):
+    y_val = curve_func(p[0])
+    # Convert JAX array to numpy if needed
+    if hasattr(y_val, 'block_until_ready'):
+        y_val = np.asarray(y_val)
+    return p[1] - y_val
 
 # 2. Generate training data points and labels for visualization
-# Use a smaller number of samples for a clearer plot
+# Increase samples for a much denser, clearer plot
 data_key = jax.random.PRNGKey(42)
-viz_points, viz_labels = generate_data(analytical_f_for_data, n_samples=2000, key=data_key)
+viz_points, viz_labels = generate_data(analytical_f_for_data, n_samples=20000, key=data_key)
 
-# 3. Plot the ground truth curve
-fig, ax = plt.subplots(figsize=(8, 6))
-x_curve = np.linspace(box_min[0] - x_padding, box_max[0] + x_padding, 400)
-y_curve = curve_func(x_curve)
-ax.plot(x_curve, y_curve, 'k--', lw=2, label='Ground Truth Boundary')
-
-# 4. Scatter plot of the generated data
-scatter = ax.scatter(viz_points[:, 0], viz_points[:, 1], c=viz_labels, cmap='viridis', alpha=0.6, s=10)
-ax.set_title('Generated Training Data for the Neural Network')
-ax.set_xlabel('x')
-ax.set_ylabel('y')
-ax.set_xlim(viz_points[:, 0].min(), viz_points[:, 0].max())
-ax.set_ylim(viz_points[:, 1].min(), viz_points[:, 1].max())
-ax.legend()
-plt.show()
-
+# 3. Visualize training data
+visualize_training_data(
+    viz_points, viz_labels, curve_func, box_min, box_max,
+    x_padding, y_padding, p0f, p1f
+)
 
 #%%
 # CELL 3: TRAIN NN AND RUN TRACE
 # ----------------------------------------------------------------
+# %matplotlib widget
+
 print("\nStarting curve trace with NN model...")
 
 config = TraceConfig(
-    max_iter=200
+    # Rails and termination
+    max_iter=1000,
+    ds_min=1e-3,
+    ds_max=2e-1,
+    arc_eps=1e-3,
+    # CurvVar damping
+    alpha_kappa_var=0.2,
+    kappa_var_power=0.3,
+    beta_radius=3.5,
+    # Newton trust-region policy
+    shrink_factor=0.9,
+    shrink_iters=5,
+    # Hessian bootstrap shaping
+    hess_ema_decay=0.9,
+    curvvar_eps_factor=0.2,
+    curvvar_eps_min=1e-6,
+    curvvar_clip=25.0,
+    # Step init
+    init_step_fraction=0.9,
+    # Trust radius lower bound factor
+    rho_min_factor=1.2,
+    # Damping cap (prevents collapse from spikes)
+    curvvar_damping_cap=3.0,
 )
 
 # 1. Define analytical function for the NN to learn
-analytical_f = lambda p: p[1] - curve_func(p[0])
+def analytical_f(p):
+    y_val = curve_func(p[0])
+    # Convert JAX array to numpy if needed
+    if hasattr(y_val, 'block_until_ready'):
+        y_val = np.asarray(y_val)
+    return p[1] - y_val
 
 # 2. Get the NN-backed functions (f and gradient)
-nn_f, nn_grad = get_nn_functions(analytical_f)
+# Increase n_samples so the NN sees a much denser dataset
+nn_f, nn_grad, raw_nn_func = get_nn_functions(analytical_f, n_samples=12000, n_epochs=400)
 
+# Debug: Test the NN functions at the start and end points
+debug_nn_functions(nn_f, nn_grad, analytical_f, p0f, p1f)
+#%%
+# %matplotlib widget
+# Visualize how well the NN learned the implicit function
+visualize_nn_learning_quality(
+    curve_func, analytical_f, raw_nn_func, nn_grad, box_min, box_max,
+    x_padding, y_padding, p0f, p1f
+)
+plt.show()
+#%%
 # 3. Run the tracer using the NN functions
 results = trace_curve_in_box(
     p0f, p1f, nn_f, box_min, box_max, config,
     gfun_override=nn_grad,
+    f_autodiff=nn_f,
     track_deltas=True,
     track_radii=True,
-    track_kappa=True,
+    track_curvvar=True,
     track_step_sizes=True,
     capture_steps=False,
-    enable_logging=False
+    enable_logging=True
 )
 
 print("\nTrace Results:")
@@ -128,5 +182,5 @@ print("\nPlotting results...")
 plot_trace_result(curve_func, box_min, box_max, p0f, p1f, results,
                  point1_edge, point2_edge, x_padding, y_padding, curve_name)
 
-print(f"\nPlot shows the traced curve (using NN) from {point1_edge} to {point2_edge} edge.")
-plt.show() # Display the plot
+plt.show()
+
