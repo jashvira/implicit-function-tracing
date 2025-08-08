@@ -226,3 +226,114 @@
 ## 2025-07-14 14:41:29
 **EDITED** tracer.py - Restored tangent flipping
 
+## 2025-07-29 12:52:46
+**EDITED** nn_visualization.py - Added third subplot
+
+## 2025-07-29 12:53:04
+**EDITED** nn_visualization.py - Add model parameter
+
+## 2025-07-29 12:53:32
+**EDITED** nn_visualization.py - No functional change - just whitespace/formatting adjustments.
+
+## 2025-07-29 12:55:56
+**EDITED** nn_visualization.py - Classification visualization added
+
+## 2025-07-29 12:56:48
+**EDITED** nn_visualization.py - Added argmax visualization
+
+## 2025-07-29 13:01:50
+**EDITED** nn_visualization.py - No change made
+
+## 2025-07-29 13:03:15
+**EDITED** nn_visualization.py - Improved colorbar labels
+
+## 2025-07-29 13:07:10
+**EDITED** nn_visualization.py - No actual change
+
+## 2025-07-29 13:12:39
+**EDITED** nn_model.py - **Fourier network replacement**
+
+## 2025-07-29 13:12:55
+**EDITED** nn_model.py - No functional change.
+
+## 2025-07-29 13:13:06
+**EDITED** nn_model.py - No actual change.
+
+## 2025-07-29 13:15:15
+**EDITED** nn_model.py - Spline network replacement.
+
+## 2025-07-29 13:15:36
+**EDITED** nn_model.py - Increased training epochs
+
+## 2025-07-29 13:15:52
+**EDITED** nn_model.py - No functional change.
+
+(The function signature and docstring remain identical - only internal model class references were updated from Fourier to ReLU spline architecture)
+
+## 2025-07-29 13:17:06
+**EDITED** nn_model.py - Fixed batch dimensions.
+
+## 2025-07-29 13:31:16
+**EDITED** nn_model.py - Spline to hinge.
+
+## 2025-07-29 13:31:31
+**EDITED** nn_model.py - No functional change.
+
+## 2025-07-29 13:31:42
+**EDITED** nn_model.py - The code change doesn't show any difference in the function signature you provided. However, based on the broader context of the changes I made:
+
+**Network upgrade**
+
+I replaced the spline-based network with a hinge-based architecture that uses learnable knot positions instead of fixed spline centers.
+
+## 2025-07-29 13:34:34
+**EDITED** nn_model.py - ResNet architecture upgrade
+
+## 2025-07-29 13:34:47
+**EDITED** nn_model.py - No functional change.
+
+## 2025-07-29 13:34:57
+**EDITED** nn_model.py - No actual change.
+
+## 2025-07-29 13:56:31
+**WROTE** debug_nn_issues.py - NN debug script
+
+## 2025-07-29 13:59:12
+**EDITED** nn_model.py - Added raw field method
+
+## 2025-07-29 13:59:36
+**EDITED** nn_model.py - **Use raw field**
+
+## 2025-07-29 13:59:56
+**EDITED** nn_model.py - Use raw field
+
+## 2025-07-29 14:00:27
+**WROTE** test_fixed_nn.py - NN fix test
+
+## 2025-07-29 14:01:50
+**EDITED** nn_model.py - Added output flag
+
+## 2025-07-29 14:02:12
+**EDITED** nn_model.py - No visible change - the code snippets shown are identical.
+
+## 2025-07-29 14:02:35
+**EDITED** nn_model.py - Reverted f1-f2 approach
+
+## 2025-07-29 14:03:51
+**EDITED** nn_model.py - Lowered temperature
+
+## 2025-07-29 14:05:07
+**EDITED** nn_model.py - Scale output 3x
+
+## 2025-07-29 14:06:19
+**EDITED** nn_model.py - Increased temperature
+
+## 2025-07-29 14:20:15
+**EDITED** nn_model.py - Removed temperature scaling
+
+## 2025-07-29 14:28:41
+**EDITED** nn_model.py - Added JAX config
+
+## 2025-07-29 14:40:06
+**EDITED** nn_model.py - Added raw output
+
