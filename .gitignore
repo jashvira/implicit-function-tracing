@@ -12,3 +12,12 @@ wheels/
 # Data
 trace_states/
 *.png
+
+# Environment variables
+.env
+.env.*
+*.env
+**/.env
+**/*.env
+.envrc
+.envrc.local
