@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.linalg import norm
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 # Import logger - handle both relative and absolute imports
 try:
@@ -30,14 +30,22 @@ try:
 except ImportError:
     from logger import logger
 
-# Import numerical utilities
+# Import numerical utilities (κ-free control)
 try:
     from .numerical_utils import (
-        get_curvature, next_step_size, initialize_step_control
+        curvature_variation_from_points,
+        initialize_step_control_kfree,
+        next_step_size_kfree,
+        compute_hessian_norm_jax,
+        curvvar_bootstrap_from_hessian,
     )
 except ImportError:
     from numerical_utils import (
-        get_curvature, next_step_size, initialize_step_control
+        curvature_variation_from_points,
+        initialize_step_control_kfree,
+        next_step_size_kfree,
+        compute_hessian_norm_jax,
+        curvvar_bootstrap_from_hessian,
     )
 
 # ---------------------------------------------------------------------------
@@ -195,21 +203,21 @@ def newton_tr(f, gfun, x_pred, prev_tangent_vec, *, step0, max_iter=10, max_shri
 # ---------------------------------------------------------------------------
 
 
-def _check_endpoint_snap(current_pos: np.ndarray, p1: np.ndarray, snap_eps: float, pts: list, eval_counter: list, delta_history: list, radius_history: list, kappa_history: list, step_size_history: list, captured_steps: list) -> TraceResult:
+def _check_endpoint_snap(current_pos: np.ndarray, p1: np.ndarray, snap_eps: float, pts: list, eval_counter: list, delta_history: list, radius_history: list, curvvar_history: list, step_size_history: list, captured_steps: list) -> TraceResult:
     """Check if we should snap to endpoint and return TraceResult if so."""
     if norm(current_pos - p1) < snap_eps:
         pts.append(p1.copy())
         # Maintain radius_history length alignment by duplicating last radius
         if radius_history is not None and len(radius_history) > 0:
             radius_history.append(radius_history[-1])
-        # Maintain kappa_history length alignment by duplicating last kappa
-        if kappa_history is not None and len(kappa_history) > 0:
-            kappa_history.append(kappa_history[-1])
+        # Maintain curvvar_history length alignment by duplicating last metric
+        if curvvar_history is not None and len(curvvar_history) > 0:
+            curvvar_history.append(curvvar_history[-1])
         # Maintain step_size_history length alignment by duplicating last step size
         if step_size_history is not None and len(step_size_history) > 0:
             step_size_history.append(step_size_history[-1])
         logger.log("Snapped to endpoint", "SUCCESS")
-        return TraceResult(np.asarray(pts), True, "snapped_to_endpoint", eval_counter[0], delta_history, radius_history, kappa_history, step_size_history, captured_steps)
+        return TraceResult(np.asarray(pts), True, "snapped_to_endpoint", eval_counter[0], delta_history, radius_history, curvvar_history, step_size_history, captured_steps)
     return None
 
 
@@ -222,17 +230,33 @@ def _check_endpoint_snap(current_pos: np.ndarray, p1: np.ndarray, snap_eps: floa
 # ### 4. MAIN TRACING FUNCTION
 # ---------------------------------------------------------------------------
 
-
+ # TraceConfig parameter reference:
+ # See docs/trace_config.md for a concise guide to all configuration knobs,
+ # their roles, and key interactions (step-size formula and trust-radius logic).
+ 
 @dataclass
 class TraceConfig:
-    ds_min: float = 5e-3 # keep this small enough for snapping to work! ! Should be set using GC
-    ds_max: float = 2e-1 # This massively controls the crazy newton behaviour, i.e. great for keeping it on leash. ! Should be set using box size
+    # Step-size rails and termination
+    ds_min: float = 5e-3
+    ds_max: float = 2e-1
     arc_eps: float = 1e-5
-    snap_eps: float = 1e-3
     max_iter: int = 1000
-    rho_min: float = 1e-12
-    shrink: float = 0.9 # This guy gets things moving off the high curvature spots. The bigger, more liberal it is.
-    max_shrink: int = 1 # This guy just doubles down on the shrink effect
+    # κ-free control parameters
+    alpha_kappa_var: float = 0.5   # damping gain for curvature-variation
+    kappa_var_power: float = 0.5   # damping exponent p
+    beta_radius: float = 1.0       # gain from trust radius to step size
+    # Concrete, explicit parameters (no hidden magic numbers)
+    init_step_fraction: float = 0.5       # initial ds as fraction of ds_max
+    rho_min_factor: float = 0.25          # minimal trust radius: rho_min_factor * ds_min
+    shrink_factor: float = 0.8            # Newton trust-region shrink per retry
+    shrink_iters: int = 2                 # Newton trust-region retries per step
+    snap_eps_override: float | None = None
+    # Hessian-bootstrap stability (adaptive, but parameterized)
+    hess_ema_decay: float = 0.8           # EMA decay for Hess norm (old weight)
+    curvvar_eps_factor: float = 0.05      # eps_adapt = max(curvvar_eps_min, curvvar_eps_factor * hess_ema)
+    curvvar_eps_min: float = 1e-6         # floor for eps_adapt
+    curvvar_clip: float = 50.0            # clip for CurvVar during bootstrap
+    curvvar_damping_cap: float = float('inf')  # optional cap on damping denominator
 
 
 class TraceResult(NamedTuple):
@@ -242,9 +266,37 @@ class TraceResult(NamedTuple):
     f_evals: int
     delta_history: list = None
     radius_history: list = None
-    kappa_history: list = None
+    curvvar_history: list = None
     step_size_history: list = None
     captured_steps: list = None
+
+
+# ---------------------------------------------------------------------------
+# ### CurvVar Bootstrap State (to avoid nonlocal usage)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CurvVarBootstrapState:
+    last_hess_norm: Optional[float] = None
+    hess_ema: Optional[float] = None
+
+    def value(self, f_for_hess, current_pos: np.ndarray, cfg: TraceConfig) -> tuple[Optional[float], Optional[float]]:
+        """Compute bootstrap CurvVar from Hessian at current_pos and update state."""
+        hnorm = compute_hessian_norm_jax(f_for_hess, current_pos)
+        # EMA update for Hess norm using config
+        if self.hess_ema is None:
+            self.hess_ema = hnorm
+        else:
+            self.hess_ema = cfg.hess_ema_decay * self.hess_ema + (1.0 - cfg.hess_ema_decay) * hnorm
+        eps_adapt = max(cfg.curvvar_eps_min, cfg.curvvar_eps_factor * self.hess_ema)
+        val = curvvar_bootstrap_from_hessian(
+            self.last_hess_norm, hnorm,
+            eps=eps_adapt,
+            clip=cfg.curvvar_clip,
+        )
+        self.last_hess_norm = hnorm
+        return val, self.last_hess_norm
 
 
 @dataclass
@@ -261,7 +313,7 @@ class StepState:
     reason: str
 
 
-def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg: TraceConfig = TraceConfig(), track_deltas: bool = False, track_radii: bool = False, track_kappa: bool = False, track_step_sizes: bool = False, capture_steps: bool = False, enable_logging: bool = False, console_output: bool = False, gfun_override=None) -> TraceResult:
+def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg: TraceConfig = TraceConfig(), track_deltas: bool = False, track_radii: bool = False, track_curvvar: bool = False, track_step_sizes: bool = False, capture_steps: bool = False, enable_logging: bool = False, console_output: bool = False, gfun_override=None, f_autodiff=None) -> TraceResult:
     """Trace the f=0 curve inside `box` from p0 to p1 (both on frame)."""
     if enable_logging:
         logger.enable(console_output=console_output)
@@ -271,7 +323,7 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
     # ### INITIALIZATION
     delta_history = [] if track_deltas else None
     radius_history = [] if track_radii else None
-    kappa_history = [] if track_kappa else None
+    curvvar_history = [] if track_curvvar else None
     step_size_history = [] if track_step_sizes else None
     captured_steps = [] if capture_steps else None
 
@@ -292,12 +344,21 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
     pts = [p0.copy()]
     current_pos = p0.copy()
 
-    # ### INITIALIZE STEP CONTROL
-    step_size, curvature_prev = initialize_step_control(f, gfun, p0, eval_counter, cfg)
-    logger.log(f"Initialization: curvature_0={curvature_prev:.3f}, step_size_0={step_size:.3e} (implicit)")
+    # ### INITIALIZE STEP CONTROL (κ-free)
+    step_size = initialize_step_control_kfree(p0, cfg)
+    logger.log(f"Initialization: step_size_0={step_size:.3e} (kappa-free)")
 
     def inside(q): return (box_min[0] <= q[0] <= box_max[0] and
                            box_min[1] <= q[1] <= box_max[1])
+
+    # Compute CurvVar (true or Hessian-bootstrap) and optionally update bootstrap state
+    boot = CurvVarBootstrapState()
+    def _curvvar_value() -> tuple[Optional[float], Optional[float]]:
+        if len(pts) >= 4:
+            return curvature_variation_from_points(pts), boot.last_hess_norm
+        # Prefer an autodiff-friendly scalar f if provided (JAX only)
+        f_for_hess = f_autodiff if (f_autodiff is not None) else f
+        return boot.value(f_for_hess, current_pos, cfg)
 
     # ### MAIN TRACING LOOP
     for step in range(cfg.max_iter):
@@ -310,14 +371,24 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
         logger.log(f"Newton call: step={step}, ds={step_size:.3e}")
 
         # ### NEWTON CORRECTION
-        # enforce a minimal trust-region radius so Newton never stalls in place
-        init_rad = max(step_size, cfg.rho_min)
+    # enforce a minimal trust-region radius so Newton never stalls in place
+        # Derive a conservative minimal trust-radius from ds_min
+        init_rad = max(step_size, cfg.rho_min_factor * cfg.ds_min)
 
         # Capture Newton attempts if requested
         attempts = [] if capture_steps else None
 
-        corrected_pos, newton_success, final_radius = newton_tr(f, gfun, predicted_pos, tangent_vec, step0=init_rad,
-                                    max_shrink=cfg.max_shrink, shrink=cfg.shrink, counter=eval_counter, delta_history=delta_history, attempts=attempts)
+        # Fixed shrink policy using explicit config
+        shrink_iters = cfg.shrink_iters
+        corrected_pos, newton_success, final_radius = newton_tr(
+            f, gfun, predicted_pos, tangent_vec,
+            step0=init_rad,
+            max_shrink=shrink_iters,
+            shrink=cfg.shrink_factor,
+            counter=eval_counter,
+            delta_history=delta_history,
+            attempts=attempts,
+        )
 
         step_success = newton_success and inside(corrected_pos)
 
@@ -345,20 +416,33 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
         # ### HANDLE STEP FAILURE
         if not newton_success or not inside(corrected_pos):
             # ### ENDPOINT SNAPPING (if close)
-            snap_result = _check_endpoint_snap(current_pos, p1, cfg.snap_eps, pts, eval_counter, delta_history, radius_history, kappa_history, step_size_history, captured_steps)
+            # Use arc_eps unless explicitly overridden
+            snap_eps = cfg.snap_eps_override if (cfg.snap_eps_override is not None) else cfg.arc_eps
+            snap_result = _check_endpoint_snap(current_pos, p1, snap_eps, pts, eval_counter, delta_history, radius_history, curvvar_history, step_size_history, captured_steps)
             if snap_result is not None:
                 logger.endpoint_snap(f"[{p1[0]:.6f}, {p1[1]:.6f}]")
                 logger.trace_complete("snapped_to_endpoint", len(pts), eval_counter[0])
-                return TraceResult(np.asarray(pts), True, "snapped_to_endpoint", eval_counter[0], delta_history, radius_history, kappa_history, step_size_history, captured_steps)
+                return TraceResult(np.asarray(pts), True, "snapped_to_endpoint", eval_counter[0], delta_history, radius_history, curvvar_history, step_size_history, captured_steps)
 
             # ### STEP SIZE REDUCTION (failure recovery)
+            # If the trust-radius was clamped by the floor (init_rad > step_size_old),
+            # basing the next step size on final_radius creates a fixed point where
+            # ds_k+1 == ds_k. In that case, shrink relative to the previous step_size
+            # to ensure actual reduction; otherwise, use final_radius.
             step_size_old = step_size
-            step_size = max(final_radius*cfg.shrink, cfg.ds_min)
-            logger.log(f"Step size reduction: {step_size_old:.3e} → {step_size:.3e} (failure)")
+            was_clamped = init_rad > step_size_old
+            if was_clamped:
+                step_size = max(step_size_old * cfg.shrink_factor, cfg.ds_min)
+                logger.log(
+                    f"Step size reduction (clamped radius): {step_size_old:.3e} → {step_size:.3e} (failure)")
+            else:
+                step_size = max(final_radius * cfg.shrink_factor, cfg.ds_min)
+                logger.log(
+                    f"Step size reduction: {step_size_old:.3e} → {step_size:.3e} (failure)")
             if step_size <= cfg.ds_min:
                 logger.log("Aborting: minimum step size reached", "ERROR")
                 logger.trace_complete("minimum_step_size", len(pts), eval_counter[0])
-                return TraceResult(np.asarray(pts), False, "minimum_step_size", eval_counter[0], delta_history, radius_history, kappa_history, step_size_history, captured_steps)
+                return TraceResult(np.asarray(pts), False, "minimum_step_size", eval_counter[0], delta_history, radius_history, curvvar_history, step_size_history, captured_steps)
             continue
 
         # ### PROCESS SUCCESSFUL STEP
@@ -370,9 +454,10 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
         if radius_history is not None:
             radius_history.append(final_radius)
 
-        # Record the curvature for this accepted point
-        if kappa_history is not None:
-            kappa_history.append(curvature_prev)  # Use the curvature from previous step that led to this point
+        # Record the curvature-variation metric for this accepted point
+        curv_val, _ = _curvvar_value()
+        if curvvar_history is not None:
+            curvvar_history.append(0.0 if curv_val is None else curv_val)
 
         # Record the step size used for this step
         if step_size_history is not None:
@@ -383,15 +468,18 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
         if dist_to_target < cfg.arc_eps:
             logger.log("Reached target successfully", "SUCCESS")
             logger.trace_complete("reached_target", len(pts), eval_counter[0])
-            return TraceResult(np.asarray(pts), True, "reached_target", eval_counter[0], delta_history, radius_history, kappa_history, step_size_history, captured_steps)
+            return TraceResult(np.asarray(pts), True, "reached_target", eval_counter[0], delta_history, radius_history, curvvar_history, step_size_history, captured_steps)
 
-        # ### UPDATE STEP CONTROL
-        curvature_current = get_curvature(f, gfun, current_pos, pts, eval_counter)
-        delta_prev = norm(corrected_pos - predicted_pos)  # Track actual Newton pull-back
-        step_size_new, current_radius = next_step_size(step_size, curvature_prev, curvature_current, delta_prev, final_radius, cfg)
-        curvature_prev = curvature_current
+        # ### UPDATE STEP CONTROL (κ-free)
+        delta_prev = norm(corrected_pos - predicted_pos)  # actual Newton pull-back
+        curv_var, _ = _curvvar_value()
+        step_size_new, current_radius = next_step_size_kfree(
+            delta_prev, final_radius, cfg,
+            curv_var=(0.0 if curv_var is None else curv_var), alpha=cfg.alpha_kappa_var,
+            power=cfg.kappa_var_power, beta=cfg.beta_radius
+        )
 
-        logger.step_size_update(step_size, step_size_new, curvature_current, current_radius)
+        logger.step_size_update(step_size, step_size_new, (0.0 if curv_var is None else curv_var), current_radius, metric_name="CurvVar")
 
         step_size = step_size_new
 
@@ -404,3 +492,11 @@ def trace_curve_in_box(p0: np.ndarray, p1: np.ndarray, f, box_min, box_max, cfg:
         if candidate_tangent_vec @ tangent_vec < 0:
             candidate_tangent_vec = -candidate_tangent_vec
         tangent_vec = candidate_tangent_vec / norm(candidate_tangent_vec)
+
+    # ### FINALIZATION (loop exhausted without reaching target)
+    logger.log("Terminating: maximum iterations reached", "WARN")
+    logger.trace_complete("max_iter_reached", len(pts), eval_counter[0])
+    return TraceResult(
+        np.asarray(pts), False, "max_iter_reached", eval_counter[0],
+        delta_history, radius_history, curvvar_history, step_size_history, captured_steps
+    )

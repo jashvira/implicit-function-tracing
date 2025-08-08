@@ -113,11 +113,11 @@ class TraceLogger:
                 status += " (Outside box)"
             self.logger.warning(f"{status} | Position: {position}")
 
-    def step_size_update(self, old_size: float, new_size: float, curvature: float, radius: float):
-        """Log step size update."""
+    def step_size_update(self, old_size: float, new_size: float, metric: float, radius: float, metric_name: str = "CurvVar"):
+        """Log step size update with a named metric (e.g., curvature variation)."""
         arrow = "↓" if new_size < old_size else "↑" if new_size > old_size else "="
         self.logger.info(f"Step size: {old_size:.3e} {arrow} {new_size:.3e}")
-        self.logger.info(f"   Curvature: {curvature:.3f} | Radius: {radius:.3e}")
+        self.logger.info(f"   {metric_name}: {metric:.3f} | Radius: {radius:.3e}")
 
     def endpoint_snap(self, target: str):
         """Log endpoint snapping."""
