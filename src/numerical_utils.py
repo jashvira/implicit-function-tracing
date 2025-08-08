@@ -1,10 +1,10 @@
 """
-numerical_utils.py  ░  v0.1
+numerical_utils.py  ░  v0.2
 --------------------------------
 Numerical analysis utilities for curve tracing:
 • Gradient estimation via finite differences
-• Curvature computation via implicit derivatives and geometric methods
-• Adaptive step size control based on curvature
+• 3-point curvature and curvature-variation helper
+• κ-free adaptive step size control driven by trust radius and curvature variation
 • Trust region management for Newton iterations
 
 This module provides the core numerical analysis functions used by the curve tracer,
@@ -69,146 +69,117 @@ def three_pt_kappa(point_a: np.ndarray, point_b: np.ndarray, point_c: np.ndarray
     return 2 * sin_t / acn
 
 
-def implicit_curvature(f: Callable, point: np.ndarray, gfun: Callable,
-                       eval_counter: List[int], tolerance: float = 1e-6) -> float:
-    """Compute curvature of implicit curve f(x,y)=0 at point using derivatives.
+def compute_hessian_norm_jax(f: Callable, point: np.ndarray) -> float:
+    """Compute Frobenius norm of Hessian using JAX autodiff.
+
+    Expects f to accept a numpy/jax array of shape (2,) and return a scalar compatible with JAX tracing.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    def f_wrapped(x_j):
+        # Expect f to handle JAX arrays and return a JAX scalar
+        return jnp.asarray(f(x_j))
+
+    H = jax.hessian(f_wrapped)(jnp.asarray(point))
+    return float(jnp.linalg.norm(H, ord='fro'))
+
+
+def curvvar_bootstrap_from_hessian(
+    prev_hess_norm: Optional[float],
+    curr_hess_norm: float,
+    eps: float = 1e-4,
+    clip: Optional[float] = None,
+) -> Optional[float]:
+    """Relative change of Hessian norm as a bootstrap CurvVar proxy.
+
+    Uses a larger epsilon and optional clipping to avoid extreme spikes
+    during the first few steps when the Hessian norm can be tiny.
+
+    Returns None if prev_hess_norm is not available yet.
+    """
+    if prev_hess_norm is None:
+        return None
+    val = abs(curr_hess_norm - prev_hess_norm) / max(curr_hess_norm, eps)
+    if clip is not None:
+        val = min(val, clip)
+    return val
+
+
+def curvature_variation_from_points(pts: List[np.ndarray], eps: float = 1e-12) -> float:
+    """Estimate relative curvature change using last four points.
+
+    Uses two consecutive 3-point curvature estimates based on the last four
+    accepted points: k1 from (p_{-4}, p_{-3}, p_{-2}) and k2 from
+    (p_{-3}, p_{-2}, p_{-1}). Returns a relative change metric
+    r_k = |k2 - k1| / max(k2, eps).
 
     Args:
-        f: Implicit function f(x,y) = 0
-        point: Point at which to compute curvature
-        gfun: Gradient function
-        eval_counter: List to track function evaluations
-        tolerance: Finite difference tolerance
+        pts: Sequence of accepted points; must have length >= 4.
+        eps: Small positive number to avoid division by zero.
 
     Returns:
-        Curvature value (positive scalar)
+        Non-negative scalar measuring curvature variation. If insufficient
+        points are available, returns 0.0.
     """
-    x, y = point
-    finite_diff_step = tolerance * max(1.0, norm(point))
-
-    # First derivatives (already computed)
-    fx, fy = gfun(point)
-
-    # Second derivatives via finite differences
-    fxx = (f(np.array([x + finite_diff_step, y])) - 2 * f(point) +
-           f(np.array([x - finite_diff_step, y]))) / finite_diff_step**2
-
-    fyy = (f(np.array([x, y + finite_diff_step])) - 2 * f(point) +
-           f(np.array([x, y - finite_diff_step]))) / finite_diff_step**2
-
-    fxy = (f(np.array([x + finite_diff_step, y + finite_diff_step])) -
-           f(np.array([x + finite_diff_step, y - finite_diff_step])) -
-           f(np.array([x - finite_diff_step, y + finite_diff_step])) +
-           f(np.array([x - finite_diff_step, y - finite_diff_step]))) / (4 * finite_diff_step**2)
-
-    # Update function evaluation counter
-    eval_counter[0] += 5  # 5 extra evaluations for second derivatives
-
-    # Curvature formula
-    grad_norm_sq = fx**2 + fy**2
-    if grad_norm_sq < 1e-12:
+    if len(pts) < 4:
         return 0.0
 
-    numerator = abs(fxx * fy**2 - 2 * fxy * fx * fy + fyy * fx**2)
-    denominator = grad_norm_sq**(3/2)
+    k1 = abs(three_pt_kappa(pts[-4], pts[-3], pts[-2]))
+    k2 = abs(three_pt_kappa(pts[-3], pts[-2], pts[-1]))
 
-    return numerator / denominator
-
-
-def compute_curvature_from_points(points: np.ndarray) -> np.ndarray:
-    """Compute 3-point curvature values from a sequence of points.
-
-    Args:
-        points: Array of points [(x1,y1), (x2,y2), ...]
-
-    Returns:
-        Array of curvature values (NaN for first two points)
-    """
-    curvature_vals = np.zeros(len(points))
-    curvature_vals[:2] = np.nan
-
-    for i in range(2, len(points)):
-        a, b, c = points[i-2], points[i-1], points[i]
-        ab, bc, ac = b - a, c - b, c - a
-        ab_norm, bc_norm, ac_norm = norm(ab), norm(bc), norm(ac)
-
-        if ab_norm < 1e-12 or bc_norm < 1e-12 or ac_norm < 1e-12:
-            curvature_vals[i] = np.nan
-        else:
-            cos_theta = np.clip((ab_norm**2 + bc_norm**2 - ac_norm**2) /
-                               (2 * ab_norm * bc_norm), -1, 1)
-            sin_theta = np.sqrt(1 - cos_theta**2)
-            curvature_vals[i] = 2 * sin_theta / ac_norm
-
-    return curvature_vals
+    return abs(k2 - k1) / max(k2, eps)
 
 
-def get_curvature(f: Callable, gfun: Callable, current_pos: np.ndarray,
-                  pts: List[np.ndarray], eval_counter: List[int]) -> float:
-    """Get curvature using appropriate method based on available points.
+def initialize_step_control_kfree(p0: np.ndarray, cfg) -> float:
+    """Initialize step size without curvature, using a conservative fraction of ds_max.
 
     Args:
-        f: Implicit function
-        gfun: Gradient function
-        current_pos: Current position
-        pts: List of traced points
-        eval_counter: Function evaluation counter
-
-    Returns:
-        Curvature value
-    """
-    if len(pts) < 3:
-        # Use implicit curvature for first two steps
-        return implicit_curvature(f, current_pos, gfun, eval_counter)
-    else:
-        # Use efficient 3-point method
-        return abs(three_pt_kappa(pts[-3], pts[-2], pts[-1]))
-
-
-def next_step_size(step_size_prev: float, curvature_prev: float, curvature_current: float,
-                   delta_prev: float, radius_prev: float, cfg) -> tuple[float, float]:
-    """Compute next step size using geometric mean trust-radius method.
-
-    Args:
-        step_size_prev: Previous step size
-        curvature_prev: Previous curvature
-        curvature_current: Current curvature
-        delta_prev: Previous Newton displacement
-        radius_prev: Previous trust region radius
-        cfg: TraceConfig object with step size bounds
-
-    Returns:
-        Tuple of (new_step_size, new_radius)
-    """
-    curvature_current = max(curvature_current, 1e-12)
-
-    # Geometric mean update: smooth log-space evolution
-    radius = np.sqrt(radius_prev * max(delta_prev, cfg.rho_min))
-
-    # Standard predictor step size
-    step_size = (2.0 * radius / curvature_current)**0.5
-    step_size_clipped = np.clip(step_size, cfg.ds_min, cfg.ds_max)
-
-    return step_size_clipped, radius
-
-
-def initialize_step_control(f: Callable, gfun: Callable, p0: np.ndarray,
-                          eval_counter: List[int], cfg) -> tuple[float, float]:
-    """Initialize step size using implicit curvature at the starting point.
-
-    Args:
-        f: Implicit function
-        gfun: Gradient function
-        p0: Starting point
-        eval_counter: Function evaluation counter
+        p0: Starting point (unused, reserved for future scaling)
         cfg: TraceConfig object
 
     Returns:
-        Tuple of (initial_step_size, initial_curvature)
+        Initial step size.
     """
-    initial_curvature = implicit_curvature(f, p0, gfun, eval_counter)
-    # Use ds_max to allow the boldest safe start; formula only constrains for high curvature
-    initial_step_size = np.clip((2.0 * cfg.ds_max * max(1.0, norm(p0)) /
-                                max(initial_curvature, 1e-12))**0.5, cfg.ds_min, cfg.ds_max)
+    # Conservative but configurable start; avoids big leaps before radius stabilizes
+    init_frac = getattr(cfg, 'init_step_fraction', 0.5)
+    return np.clip(init_frac * cfg.ds_max, cfg.ds_min, cfg.ds_max)
 
-    return initial_step_size, initial_curvature
+
+def next_step_size_kfree(delta_prev: float, radius_prev: float, cfg,
+                         curv_var: Optional[float] = None, alpha: Optional[float] = 0.5,
+                         power: float = 0.5, beta: float = 1.0) -> tuple[float, float]:
+    """Curvature-free step-size update driven by trust radius and curvature variation.
+
+    Args:
+        delta_prev: Previous Newton displacement (pull-back)
+        radius_prev: Previous trust region radius
+        cfg: TraceConfig with bounds; rho_min is derived internally from ds_min
+        curv_var: Relative curvature change r_k (>=0) from last 4 points
+        alpha: Damping gain (>0)
+        power: Exponent for damping (0.5 recommended)
+        beta: Gain from radius to step size (1.0 recommended)
+
+    Returns:
+        (new_step_size, new_radius)
+    """
+    # Derive a conservative lower bound for the trust-region radius from ds_min
+    rho_factor = getattr(cfg, 'rho_min_factor', 0.25)
+    rho_min = rho_factor * cfg.ds_min
+    # Update trust radius via geometric mean of last radius and pull-back
+    radius = np.sqrt(max(radius_prev, rho_min) * max(delta_prev, rho_min))
+
+    # Base predictor from radius only
+    step_size = beta * radius
+
+    # Apply curvature-variation damping
+    if curv_var is not None and alpha is not None and alpha > 0:
+        denom = (1.0 + alpha * max(curv_var, 0.0))**max(power, 0.0)
+        # Optional cap on damping to avoid collapse; configured via TraceConfig
+        cap = getattr(cfg, 'curvvar_damping_cap', float('inf'))
+        if np.isfinite(cap):
+            denom = min(denom, cap)
+        step_size = step_size / denom
+
+    step_size_clipped = np.clip(step_size, cfg.ds_min, cfg.ds_max)
+    return step_size_clipped, radius
