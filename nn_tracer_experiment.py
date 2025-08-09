@@ -9,12 +9,13 @@ This script replicates the logic of the `tracer.ipynb` notebook.
 # CELL 1: IMPORTS AND SETUP
 # ----------------------------------------------------------------
 import os
-# Set the environment variable for deterministic operations on Nvidia GPUs
+# Set environment variable for deterministic operations on Nvidia GPUs
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
+# Use a non-interactive backend for matplotlib
+os.environ.setdefault('MPLBACKEND', 'Agg')
 import jax
 jax.config.update("jax_default_matmul_precision", "float32")
 import sys
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -37,7 +38,7 @@ print("All modules loaded successfully.")
 #%%
 # CELL 2: SETUP CURVE AND TRACING PARAMETERS
 # ----------------------------------------------------------------
-curve_name = 'sine_cos'
+curve_name = 'sine'
 curve_func = get_curve_functions()[curve_name]
 
 # Pick points on curve
@@ -96,7 +97,8 @@ viz_points, viz_labels = generate_data(analytical_f_for_data, n_samples=20000, k
 # 3. Visualize training data
 visualize_training_data(
     viz_points, viz_labels, curve_func, box_min, box_max,
-    x_padding, y_padding, p0f, p1f
+    x_padding, y_padding, p0f, p1f,
+    save_path='docs/training_data.svg'
 )
 
 #%%
@@ -151,9 +153,9 @@ debug_nn_functions(nn_f, nn_grad, analytical_f, p0f, p1f)
 # Visualize how well the NN learned the implicit function
 visualize_nn_learning_quality(
     curve_func, analytical_f, raw_nn_func, nn_grad, box_min, box_max,
-    x_padding, y_padding, p0f, p1f
+    x_padding, y_padding, p0f, p1f,
+    save_path='docs/nn_learning_comparison.svg'
 )
-plt.show()
 #%%
 # 3. Run the tracer using the NN functions
 results = trace_curve_in_box(
@@ -180,7 +182,6 @@ print(f"   Traced points: {len(results.points)}")
 # ----------------------------------------------------------------
 print("\nPlotting results...")
 plot_trace_result(curve_func, box_min, box_max, p0f, p1f, results,
-                 point1_edge, point2_edge, x_padding, y_padding, curve_name)
-
-plt.show()
+                 point1_edge, point2_edge, x_padding, y_padding, curve_name,
+                 save_path='docs/trace_result.svg')
 

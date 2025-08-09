@@ -198,7 +198,8 @@ def _plot_curvature_evolution(ax, results):
 
 
 def plot_trace_result(curve_func, box_min, box_max, p0f, p1f, results,
-                     point1_edge, point2_edge, x_padding, y_padding, curve_name):
+                     point1_edge, point2_edge, x_padding, y_padding, curve_name,
+                     save_path: str | None = 'trace_result.svg'):
     """Plot the trace result with curve, radius evolution, and curvature evolution.
 
     Args:
@@ -228,4 +229,7 @@ def plot_trace_result(curve_func, box_min, box_max, p0f, p1f, results,
     # Set overall title and layout
     fig.suptitle(f'Experiment: {point1_edge}→{point2_edge} | Padding: x={x_padding}, y={y_padding}', fontsize=14)
     plt.tight_layout(rect=[0, 0, 0.85, 0.95])
+    if save_path:
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
     plt.show()

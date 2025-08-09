@@ -21,7 +21,7 @@ def visualize_nn_learning_quality(
     y_padding: float,
     p0f: np.ndarray,
     p1f: np.ndarray,
-    save_path: str = 'nn_learning_comparison.png',
+    save_path: str = 'nn_learning_comparison.svg',
     nn_model_state=None
 ) -> None:
     """
@@ -141,7 +141,7 @@ def visualize_training_data(
     y_padding: float,
     p0f: np.ndarray,
     p1f: np.ndarray,
-    save_path: str = 'training_data_visualization.png'
+    save_path: str = 'training_data_visualization.svg'
 ) -> None:
     """
     Visualize the training data used for neural network training.
@@ -187,6 +187,9 @@ def visualize_training_data(
     ax.set_ylim(viz_points[:, 1].min(), viz_points[:, 1].max())
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
     plt.show()
     print(f"Displayed training data visualization with class breakdown")
 
